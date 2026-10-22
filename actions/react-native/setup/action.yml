@@ -1,0 +1,43 @@
+name: react-native / setup
+description: Install Node from .nvmrc (Node >= 22.14, npm >= 11.5.1, as npm trusted publishing needs) and the package's dependencies
+inputs:
+  working-directory:
+    description: Package root
+    default: "."
+  version:
+    description: Version being released
+    required: true
+  channel:
+    description: internal | public
+    default: public
+  dry-run:
+    description: "\"true\" to skip anything irreversible"
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version-file: ${{ inputs.working-directory }}/.nvmrc
+
+    - name: Check Node and npm versions
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        at_least() { node -e 'const [a,b]=process.argv.slice(1).map(v=>v.split(".").map(Number));for(let i=0;i<3;i++){if((a[i]||0)!==(b[i]||0))process.exit(a[i]>b[i]?0:1)}' "$1" "$2"; }
+        at_least "$(node --version | tr -d v)" 22.14.0 || { echo "::error::Node $(node --version) from .nvmrc is below 22.14"; exit 1; }
+        at_least "$(npm --version)" 11.5.1 || npm install --global --no-audit --no-fund npm@^11.5.1
+        echo "node $(node --version), npm $(npm --version)"
+
+    - name: Install dependencies
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        if [ -f yarn.lock ]; then
+          corepack enable
+          if [ -f .yarnrc.yml ]; then yarn install --immutable; else yarn install --frozen-lockfile; fi
+        elif [ -f package-lock.json ]; then
+          npm ci --no-audit --no-fund
+        else
+          npm install --no-audit --no-fund
+        fi

@@ -1,0 +1,21 @@
+name: react-native / test
+description: Run the package's test script, if it has one
+inputs:
+  working-directory:
+    description: Package root
+    default: "."
+  version:
+    description: Version being released
+    required: true
+  channel:
+    description: internal | public
+    default: public
+  dry-run:
+    description: "\"true\" to skip anything irreversible"
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: npm run test --if-present

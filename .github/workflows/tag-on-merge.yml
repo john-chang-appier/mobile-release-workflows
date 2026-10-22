@@ -1,0 +1,87 @@
+name: tag-on-merge
+
+# Called on `pull_request: closed` into master. When a release/X.Y.Z PR was merged, tag the
+# merge commit and dispatch the caller's release.yml on that tag.
+
+on:
+  workflow_call:
+    inputs:
+      central-repo:
+        description: Repository to load release-tool from; match the repository in `uses:`
+        type: string
+        default: plaxieappier/mobile-release-workflows
+      central-ref:
+        description: Ref of central-repo to load release-tool from; match the ref in `uses:`
+        type: string
+        default: v1
+    secrets:
+      RELEASE_APP_PRIVATE_KEY:
+        description: Private key of the release GitHub App; its App ID is the RELEASE_APP_ID variable
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  tag:
+    if: github.event.pull_request.merged && startsWith(github.event.pull_request.head.ref, 'release/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Scope the App token to this repo and the central repo
+        id: scope
+        env:
+          CENTRAL_REPO: ${{ inputs.central-repo }}
+        run: echo "repositories=${GITHUB_REPOSITORY#*/},${CENTRAL_REPO#*/}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.scope.outputs.repositories }}
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.central-repo }}
+          ref: ${{ inputs.central-ref }}
+          path: .release-workflows
+          token: ${{ steps.app-token.outputs.token }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install release-tool
+        run: pip install ./.release-workflows/release-tool
+
+      - name: Tag the merge commit and dispatch release
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          version="${HEAD_REF#release/}"
+          if ! [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::${HEAD_REF} does not name a stable version"
+            exit 1
+          fi
+          tag="$(release-tool config get tag-prefix)${version}"
+
+          existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha 2>/dev/null || true)"
+          if [ -z "$existing" ]; then
+            gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$SHA" > /dev/null
+            echo "Tagged $SHA as $tag"
+          elif [ "$existing" = "$SHA" ]; then
+            echo "$tag already points at $SHA"
+          else
+            echo "::error::$tag already exists on $existing, not on the merge commit $SHA"
+            exit 1
+          fi
+
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$tag" -f dry-run=false
+          echo "Dispatched release.yml on $tag"

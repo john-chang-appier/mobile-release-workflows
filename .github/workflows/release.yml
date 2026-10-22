@@ -1,0 +1,179 @@
+name: release
+
+# Runs on a release tag ref, dispatched by tag-on-merge. Stage order: prepare → build, then
+# (later tickets) approval → publish → GitHub Release → merge-back → Slack.
+
+on:
+  workflow_call:
+    inputs:
+      channel:
+        description: internal | public
+        type: string
+        default: public
+      dry-run:
+        description: Skip anything irreversible
+        type: boolean
+        default: true
+      ci-timeout-minutes:
+        description: How long prepare waits for CI on the tagged commit to finish
+        type: number
+        default: 60
+      central-repo:
+        description: Repository to load release-tool and adapters from; match the repository in `uses:`
+        type: string
+        default: plaxieappier/mobile-release-workflows
+      central-ref:
+        description: Ref of central-repo to load release-tool and adapters from; match the ref in `uses:`
+        type: string
+        default: v1
+    secrets:
+      RELEASE_APP_PRIVATE_KEY:
+        description: Private key of the release GitHub App; its App ID is the RELEASE_APP_ID variable
+        required: true
+    outputs:
+      version:
+        description: Version being released
+        value: ${{ jobs.prepare.outputs.version }}
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      platform: ${{ steps.config.outputs.platform }}
+      version: ${{ steps.config.outputs.version }}
+      working-directory: ${{ steps.config.outputs.working-directory }}
+    steps:
+      - name: Require a tag ref
+        if: github.ref_type != 'tag'
+        run: |
+          echo "::error::release must run on a tag ref, not ${GITHUB_REF}"
+          exit 1
+
+      - name: Scope the App token to this repo and the central repo
+        id: scope
+        env:
+          CENTRAL_REPO: ${{ inputs.central-repo }}
+        run: echo "repositories=${GITHUB_REPOSITORY#*/},${CENTRAL_REPO#*/}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.scope.outputs.repositories }}
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.central-repo }}
+          ref: ${{ inputs.central-ref }}
+          path: .release-workflows
+          token: ${{ steps.app-token.outputs.token }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install release-tool
+        run: pip install ./.release-workflows/release-tool
+
+      - name: Validate config
+        id: config
+        run: |
+          release-tool config validate
+          prefix="$(release-tool config get tag-prefix)"
+          {
+            echo "platform=$(release-tool config get platform)"
+            echo "working-directory=$(release-tool config get working-directory)"
+            echo "version=${GITHUB_REF_NAME#"$prefix"}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Version files match the tag
+        run: release-tool version verify "$GITHUB_REF_NAME"
+
+      - name: CI passed on the tagged commit
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TIMEOUT_MINUTES: ${{ inputs.ci-timeout-minutes }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          # The caller's own release workflow runs on this commit too; leave it out.
+          self="${WORKFLOW_REF#"$GITHUB_REPOSITORY/"}"
+          self="${self%%@*}"
+          deadline=$(( $(date +%s) + TIMEOUT_MINUTES * 60 ))
+          while :; do
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$GITHUB_SHA&per_page=100" > runs.json
+            gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/status" > status.json
+            code=0
+            release-tool ci verify --runs runs.json --statuses status.json --exclude-path "$self" || code=$?
+            [ "$code" -ne 2 ] && exit "$code"
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::CI on $GITHUB_SHA did not finish within $TIMEOUT_MINUTES minutes"
+              exit 1
+            fi
+            echo "Waiting for CI on $GITHUB_SHA…"
+            sleep 30
+          done
+
+  build:
+    needs: prepare
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-path: ${{ steps.rn-build.outputs.artifact-path }}
+    steps:
+      - name: Scope the App token to the central repo
+        id: scope
+        env:
+          CENTRAL_REPO: ${{ inputs.central-repo }}
+        run: echo "repositories=${CENTRAL_REPO#*/}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.scope.outputs.repositories }}
+
+      - uses: actions/checkout@v4
+
+      # Adapters are loaded from this checkout, so they always match central-ref.
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.central-repo }}
+          ref: ${{ inputs.central-ref }}
+          path: .release-workflows
+          token: ${{ steps.app-token.outputs.token }}
+
+      # ── Dispatch table: the only place that names platforms. Add a platform's four stages here. ──
+
+      - if: needs.prepare.outputs.platform == 'react-native'
+        uses: ./.release-workflows/actions/react-native/setup
+        with: &stage
+          working-directory: ${{ needs.prepare.outputs.working-directory }}
+          version: ${{ needs.prepare.outputs.version }}
+          channel: ${{ inputs.channel }}
+          dry-run: ${{ inputs.dry-run }}
+      - if: needs.prepare.outputs.platform == 'react-native'
+        uses: ./.release-workflows/actions/react-native/verify
+        with: *stage
+      - if: needs.prepare.outputs.platform == 'react-native'
+        uses: ./.release-workflows/actions/react-native/test
+        with: *stage
+      - if: needs.prepare.outputs.platform == 'react-native'
+        id: rn-build
+        uses: ./.release-workflows/actions/react-native/build
+        with: *stage
+
+      # ── End of dispatch table ──
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-artifact
+          path: ${{ steps.rn-build.outputs.artifact-path }}
+          if-no-files-found: error

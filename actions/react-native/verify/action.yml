@@ -1,0 +1,46 @@
+name: react-native / verify
+description: Fail on an unsupported channel or a repository.url npm provenance would reject, then dry-run the pack
+inputs:
+  working-directory:
+    description: Package root
+    default: "."
+  version:
+    description: Version being released
+    required: true
+  channel:
+    description: internal | public
+    default: public
+  dry-run:
+    description: "\"true\" to skip anything irreversible"
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - name: Check channel
+      shell: bash
+      env:
+        CHANNEL: ${{ inputs.channel }}
+      run: |
+        case "$CHANNEL" in
+          internal|public) ;;
+          *) echo "::error::react-native supports channels internal and public, not '$CHANNEL'"; exit 1 ;;
+        esac
+
+    - name: Check repository.url
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        node -e '
+          const repo = require("./package.json").repository;
+          const url = (typeof repo === "string" ? repo : repo && repo.url) || "";
+          const norm = s => s.toLowerCase().replace(/^git\+/, "").replace(/\.git$/, "");
+          const want = "https://github.com/" + process.env.GITHUB_REPOSITORY;
+          if (norm(url) !== norm(want)) {
+            console.log("::error::package.json repository.url is \"" + url + "\"; npm provenance needs " + want);
+            process.exit(1);
+          }'
+
+    - name: npm pack --dry-run
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: npm pack --dry-run

@@ -2,7 +2,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import config, locators, versions
+from . import ci, config, locators, versions
 
 
 def main(argv=None) -> int:
@@ -26,7 +26,15 @@ def main(argv=None) -> int:
     write.add_argument("version")
     write.add_argument("--repo", type=Path, default=Path("."))
 
+    ci_cmd = groups.add_parser("ci").add_subparsers(dest="command", required=True)
+    ci_verify = ci_cmd.add_parser("verify")
+    ci_verify.add_argument("--runs", type=Path, required=True, help="GET /repos/{repo}/actions/runs?head_sha=…")
+    ci_verify.add_argument("--statuses", type=Path, required=True, help="GET /repos/{repo}/commits/{sha}/status")
+    ci_verify.add_argument("--exclude-path", required=True, help="workflow file of the running release, ignored")
+
     args = parser.parse_args(argv)
+    if args.group == "ci":
+        return _ci_verify(args)
     try:
         data = config.load(args.repo)
         if args.group == "config" and args.command == "get":
@@ -48,3 +56,18 @@ def _verify(args, data) -> int:
     for line in bad:
         print(f"error: {line}", file=sys.stderr)
     return 1 if bad else 0
+
+
+CI_PENDING = 2
+
+
+def _ci_verify(args) -> int:
+    """Exit 0 when CI passed, 1 when it failed, 2 while it is still running or not started."""
+    v = ci.verdict(args.runs, args.statuses, args.exclude_path)
+    for line in v.failed:
+        print(f"error: {line}", file=sys.stderr)
+    for line in v.pending:
+        print(f"pending: {line}", file=sys.stderr)
+    if v.failed:
+        return 1
+    return CI_PENDING if v.pending else 0

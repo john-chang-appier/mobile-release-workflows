@@ -5,6 +5,9 @@ The shared release pipeline for Appier mobile SDKs. Design: MT-9607 proposal in
 
 | Path | What it is |
 | --- | --- |
+| `.github/workflows/tag-on-merge.yml` | Reusable workflow: when a `release/X.Y.Z` PR merges to `master`, tag the merge commit and dispatch the caller's `release.yml` on it |
+| `.github/workflows/release.yml` | Reusable release skeleton, run on a tag: prepare (config, versions = tag, CI green) → build through the platform adapter |
+| `actions/<platform>/<stage>` | Platform adapters: `setup`, `verify`, `test`, `build`, each taking `working-directory`, `version`, `channel`, `dry-run` |
 | `.github/workflows/prepare-release.yml` | Reusable workflow: cut or reuse `release/X.Y.Z`, sync version files, prepend the CHANGELOG section, open the PR to `master` |
 | `release-tool/` | Python CLI holding the release decision logic; the unit-test seam |
 | `scripts/prepare-release.sh` | Git steps of `prepare-release`, runnable locally against any remote |
@@ -44,6 +47,8 @@ release-tool config validate              # exit 1 naming the offending field
 release-tool config get <key>             # platform | working-directory | tag-prefix
 release-tool version write <X.Y.Z[-rc.N]> # rewrite every version file
 release-tool version verify <tag>         # exit 1 listing every file that disagrees
+release-tool ci verify --runs F --statuses F --exclude-path P
+                                          # exit 0 CI passed, 1 failed, 2 still running
 ```
 
 All commands take `--repo <dir>` (default `.`).

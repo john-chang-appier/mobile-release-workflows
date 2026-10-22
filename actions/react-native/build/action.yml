@@ -1,0 +1,30 @@
+name: react-native / build
+description: npm pack the package into a tarball
+inputs:
+  working-directory:
+    description: Package root
+    default: "."
+  version:
+    description: Version being released
+    required: true
+  channel:
+    description: internal | public
+    default: public
+  dry-run:
+    description: "\"true\" to skip anything irreversible"
+    default: "true"
+outputs:
+  artifact-path:
+    description: Absolute path of the packed tarball
+    value: ${{ steps.pack.outputs.artifact-path }}
+runs:
+  using: composite
+  steps:
+    - id: pack
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        out="$RUNNER_TEMP/release-artifact"
+        mkdir -p "$out"
+        file="$(npm pack --pack-destination "$out" | tail -n 1)"
+        echo "artifact-path=$out/$file" >> "$GITHUB_OUTPUT"
