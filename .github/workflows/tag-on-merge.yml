@@ -1,7 +1,9 @@
 name: tag-on-merge
 
 # Called on `pull_request: closed` into master. When a release/X.Y.Z PR was merged, tag the
-# merge commit and dispatch the caller's release.yml on that tag.
+# merge commit and dispatch the caller's release.yml on that tag. The caller must name its
+# release workflow release.yml (npm trusted publishing is bound to that file name) and give it
+# a boolean `dry-run` input.
 
 on:
   workflow_call:
@@ -24,7 +26,10 @@ permissions:
 
 jobs:
   tag:
-    if: github.event.pull_request.merged && startsWith(github.event.pull_request.head.ref, 'release/')
+    if: >-
+      github.event.pull_request.merged &&
+      github.event.pull_request.base.ref == 'master' &&
+      startsWith(github.event.pull_request.head.ref, 'release/')
     runs-on: ubuntu-latest
     steps:
       - name: Scope the App token to this repo and the central repo
@@ -72,8 +77,16 @@ jobs:
           fi
           tag="$(release-tool config get tag-prefix)${version}"
 
-          # gh prints the 404 body on stdout, so only trust the output when the call succeeded.
-          existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha 2>/dev/null)" || existing=""
+          # gh prints the error body on stdout, so only trust the output when the call succeeded,
+          # and only read a failure as "no tag" when it was a 404.
+          if existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha 2>lookup.err)"; then
+            :
+          elif grep -q "HTTP 404" lookup.err; then
+            existing=""
+          else
+            cat lookup.err >&2
+            exit 1
+          fi
           if [ -z "$existing" ]; then
             gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$SHA" > /dev/null
             echo "Tagged $SHA as $tag"

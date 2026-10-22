@@ -14,7 +14,7 @@ def main(argv=None) -> int:
     validate.add_argument("--repo", type=Path, default=Path("."))
 
     get = cfg.add_parser("get")
-    get.add_argument("key", choices=["platform", "working-directory", "tag-prefix"])
+    get.add_argument("key", choices=["platform", "working-directory", "tag-prefix", "channels"])
     get.add_argument("--repo", type=Path, default=Path("."))
 
     version = groups.add_parser("version").add_subparsers(dest="command", required=True)
@@ -38,7 +38,8 @@ def main(argv=None) -> int:
     try:
         data = config.load(args.repo)
         if args.group == "config" and args.command == "get":
-            print(data[args.key])
+            value = data[args.key]
+            print("\n".join(value) if isinstance(value, list) else value)
         if args.group == "version" and args.command == "verify":
             return _verify(args, data)
         if args.group == "version" and args.command == "write":

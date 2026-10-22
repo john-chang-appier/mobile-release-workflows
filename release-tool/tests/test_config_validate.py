@@ -48,3 +48,8 @@ def test_get_returns_defaults_for_optional_fields(repo, run):
 
 def test_get_returns_the_configured_value(repo, run):
     assert run("config", "get", "working-directory", "--repo", repo("flutter"))[1] == "sdk\n"
+
+
+def test_get_channels_lists_the_allowed_channels_one_per_line(repo, run):
+    assert run("config", "get", "channels", "--repo", repo("react-native"))[1] == "internal\npublic\n"
+    assert run("config", "get", "channels", "--repo", repo("android"))[1] == "public\n"

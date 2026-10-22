@@ -1,5 +1,5 @@
 name: react-native / build
-description: npm pack the package into a tarball
+description: npm pack the package into a tarball; exports RELEASE_ARTIFACT_PATH like every adapter's build
 inputs:
   working-directory:
     description: Package root
@@ -26,5 +26,6 @@ runs:
       run: |
         out="$RUNNER_TEMP/release-artifact"
         mkdir -p "$out"
-        file="$(npm pack --pack-destination "$out" | tail -n 1)"
+        file="$(npm pack --pack-destination "$out" --json | jq -r '.[0].filename')"
         echo "artifact-path=$out/$file" >> "$GITHUB_OUTPUT"
+        echo "RELEASE_ARTIFACT_PATH=$out/$file" >> "$GITHUB_ENV"

@@ -84,8 +84,14 @@ jobs:
 
       - name: Validate config
         id: config
+        env:
+          CHANNEL: ${{ inputs.channel }}
         run: |
           release-tool config validate
+          if ! release-tool config get channels | grep -qxF "$CHANNEL"; then
+            echo "::error::channel '$CHANNEL' is not in release-config.yml channels: $(release-tool config get channels | xargs)"
+            exit 1
+          fi
           prefix="$(release-tool config get tag-prefix)"
           {
             echo "platform=$(release-tool config get platform)"
@@ -107,7 +113,8 @@ jobs:
           self="${self%%@*}"
           deadline=$(( $(date +%s) + TIMEOUT_MINUTES * 60 ))
           while :; do
-            gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$GITHUB_SHA&per_page=100" > runs.json
+            gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$GITHUB_SHA&per_page=100" \
+              --jq '.workflow_runs[]' | jq -s '{workflow_runs: .}' > runs.json
             gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/status" > status.json
             code=0
             release-tool ci verify --runs runs.json --statuses status.json --exclude-path "$self" || code=$?
@@ -124,7 +131,7 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     outputs:
-      artifact-path: ${{ steps.rn-build.outputs.artifact-path }}
+      artifact-path: ${{ steps.artifact.outputs.path }}
     steps:
       - name: Scope the App token to the central repo
         id: scope
@@ -166,14 +173,17 @@ jobs:
         uses: ./.release-workflows/actions/react-native/test
         with: *stage
       - if: needs.prepare.outputs.platform == 'react-native'
-        id: rn-build
         uses: ./.release-workflows/actions/react-native/build
         with: *stage
 
       # ── End of dispatch table ──
 
+      # Every adapter's build exports RELEASE_ARTIFACT_PATH, so nothing below names a platform.
+      - id: artifact
+        run: echo "path=$RELEASE_ARTIFACT_PATH" >> "$GITHUB_OUTPUT"
+
       - uses: actions/upload-artifact@v4
         with:
           name: release-artifact
-          path: ${{ steps.rn-build.outputs.artifact-path }}
+          path: ${{ steps.artifact.outputs.path }}
           if-no-files-found: error
