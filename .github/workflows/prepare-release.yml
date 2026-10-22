@@ -37,6 +37,10 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash  # an explicit bash shell runs with -eo pipefail
+
 jobs:
   prepare:
     runs-on: ubuntu-latest

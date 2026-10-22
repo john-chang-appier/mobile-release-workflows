@@ -58,9 +58,16 @@ permissions:
 env:
   CENTRAL_REPO: ${{ inputs.central-repo }}
 
+defaults:
+  run:
+    shell: bash  # an explicit bash shell runs with -eo pipefail
+
 jobs:
   prepare:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read  # is-published reads GitHub Packages for the internal channel
     outputs:
       platform: ${{ steps.config.outputs.platform }}
       version: ${{ steps.config.outputs.version }}
@@ -154,7 +161,7 @@ jobs:
       # ── Dispatch table: is-published ──
       - if: steps.config.outputs.platform == 'react-native'
         uses: ./.release-workflows/actions/react-native/is-published
-        with: &prepare-stage
+        with: &from-config
           working-directory: ${{ steps.config.outputs.working-directory }}
           version: ${{ steps.config.outputs.version }}
           channel: ${{ inputs.channel }}
@@ -241,20 +248,20 @@ jobs:
       # ── Dispatch table: setup, verify, test, build ──
       - if: needs.prepare.outputs.platform == 'react-native'
         uses: ./.release-workflows/actions/react-native/setup
-        with: &stage
+        with: &from-prepare
           working-directory: ${{ needs.prepare.outputs.working-directory }}
           version: ${{ needs.prepare.outputs.version }}
           channel: ${{ inputs.channel }}
           dry-run: ${{ inputs.dry-run }}
       - if: needs.prepare.outputs.platform == 'react-native'
         uses: ./.release-workflows/actions/react-native/verify
-        with: *stage
+        with: *from-prepare
       - if: needs.prepare.outputs.platform == 'react-native'
         uses: ./.release-workflows/actions/react-native/test
-        with: *stage
+        with: *from-prepare
       - if: needs.prepare.outputs.platform == 'react-native'
         uses: ./.release-workflows/actions/react-native/build
-        with: *stage
+        with: *from-prepare
       # ── End of dispatch table ──
 
       - uses: actions/upload-artifact@v4
@@ -304,19 +311,18 @@ jobs:
           path: ${{ runner.temp }}/release-artifact
 
       - name: Locate the artifact
-        run: echo "RELEASE_ARTIFACT_PATH=$(find "$RUNNER_TEMP/release-artifact" -type f | head -n 1)" >> "$GITHUB_ENV"
+        run: |
+          mapfile -t files < <(find "$RUNNER_TEMP/release-artifact" -type f)
+          [ "${#files[@]}" -eq 1 ] || { echo "::error::expected one artifact file, found ${#files[@]}"; exit 1; }
+          echo "RELEASE_ARTIFACT_PATH=${files[0]}" >> "$GITHUB_ENV"
 
       # ── Dispatch table: setup, publish ──
       - if: needs.prepare.outputs.platform == 'react-native'
         uses: ./.release-workflows/actions/react-native/setup
-        with: &publish-stage
-          working-directory: ${{ needs.prepare.outputs.working-directory }}
-          version: ${{ needs.prepare.outputs.version }}
-          channel: ${{ inputs.channel }}
-          dry-run: ${{ inputs.dry-run }}
+        with: *from-prepare
       - if: needs.prepare.outputs.platform == 'react-native'
         uses: ./.release-workflows/actions/react-native/publish
-        with: *publish-stage
+        with: *from-prepare
       # ── End of dispatch table ──
 
       - id: url
@@ -325,7 +331,7 @@ jobs:
   github-release:
     needs: [prepare, publish]
     if: >-
-      always() && needs.prepare.result == 'success' &&
+      !cancelled() && needs.prepare.result == 'success' &&
       (needs.publish.result == 'success' || needs.prepare.outputs.plan == 'skip-publish')
     runs-on: ubuntu-latest
     steps:
@@ -352,6 +358,10 @@ jobs:
           path: .release-workflows
           token: ${{ steps.app-token.outputs.token }}
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Install release-tool and git-cliff
         run: pip install ./.release-workflows/release-tool git-cliff==2.14.2
 
@@ -374,14 +384,16 @@ jobs:
           [ -f "$config" ] || config=.release-workflows/cliff.toml
           RELEASE_VERSION="$VERSION" GIT_CLIFF__GIT__TAG_PATTERN="$pattern" \
             git-cliff --config "$config" --current --strip header > notes.md
-          args=(--title "$VERSION" --notes-file notes.md --verify-tag)
+          title="$VERSION"
+          args=(--notes-file notes.md --verify-tag)
           [ "$PRERELEASE" = true ] && args+=(--prerelease --latest=false)
-          [ "$DRY_RUN" = true ] && args+=(--draft --title "$VERSION (dry run)")
+          [ "$DRY_RUN" = true ] && { args+=(--draft); title="$VERSION (dry run)"; }
+          args+=(--title "$title")
           gh release create "$GITHUB_REF_NAME" "${args[@]}"
 
   merge-back:
     needs: [prepare, github-release]
-    if: always() && needs.github-release.result == 'success' && needs.prepare.outputs.prerelease == 'false'
+    if: "!cancelled() && needs.github-release.result == 'success' && needs.prepare.outputs.prerelease == 'false'"
     runs-on: ubuntu-latest
     outputs:
       conflict-url: ${{ steps.develop.outputs.conflict-url }}
@@ -420,18 +432,34 @@ jobs:
             echo "conflict-url=$url" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Auto-merge waits for required checks; with none configured GitHub refuses it, so merge now.
-          gh pr merge "$url" --auto --merge || gh pr merge "$url" --merge
+          if [ "$state" != MERGEABLE ]; then
+            echo "::warning::GitHub hasn't computed whether $url can merge; leaving it open"
+            exit 0
+          fi
+          # Auto-merge waits for develop's required checks. GitHub refuses it when develop requires
+          # none (the PR is already mergeable); then merging now is what auto-merge would do.
+          if ! gh pr merge "$url" --auto --merge 2>auto.err; then
+            echo "Auto-merge not available: $(cat auto.err)"
+            gh pr merge "$url" --merge
+          fi
 
-      - name: Open PRs into other open release branches
+      - name: Open PRs into unreleased release branches (hotfix only)
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           # A hotfix must also reach release branches cut before it; those PRs are merged by a person
-          # because the branch may have an RC under QA.
+          # because the branch may have an RC under QA. A release branch whose version has a tag is
+          # finished, however long it is kept.
+          head="$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" --jq '.[0].head.ref // ""')"
+          if [[ "$head" != hotfix/* ]]; then
+            echo "Not a hotfix (merged from '${head}'); nothing more to merge back"
+            exit 0
+          fi
+          tags="$(gh api --paginate "repos/$GITHUB_REPOSITORY/tags?per_page=100" --jq '.[].name')"
+          prefix="${GITHUB_REF_NAME%"$VERSION"}"
           for branch in $(gh api --paginate "repos/$GITHUB_REPOSITORY/branches?per_page=100" --jq '.[].name' | grep '^release/' || true); do
-            [ "$branch" = "release/$VERSION" ] && continue
+            grep -qxF "${prefix}${branch#release/}" <<<"$tags" && continue
             if [ -n "$(gh pr list -R "$GITHUB_REPOSITORY" --base "$branch" --head master --state open --json number --jq '.[].number')" ]; then
               continue
             fi
@@ -450,6 +478,9 @@ jobs:
       always() && github.ref_type == 'tag' &&
       (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     steps:
       - name: Scope the App token
         id: scope
@@ -490,11 +521,7 @@ jobs:
       # ── Dispatch table: is-published ──
       - if: steps.config.outputs.platform == 'react-native'
         uses: ./.release-workflows/actions/react-native/is-published
-        with:
-          working-directory: ${{ steps.config.outputs.working-directory }}
-          version: ${{ steps.config.outputs.version }}
-          channel: ${{ inputs.channel }}
-          dry-run: ${{ inputs.dry-run }}
+        with: *from-config
       # ── End of dispatch table ──
 
       - name: Delete the tag unless the version is published

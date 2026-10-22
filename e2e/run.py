@@ -9,6 +9,7 @@ approval cancels the run, which must withdraw the tag.
     python3 e2e/run.py [--fixture OWNER/REPO] [--only NAME ...]
 """
 import argparse
+import base64
 import calendar
 import json
 import subprocess
@@ -109,7 +110,7 @@ class Fixture:
         return ref["object"]["sha"] if ref and "object" in ref else None
 
     def tags(self):
-        return [t["name"] for t in api(f"repos/{self.repo}/tags?per_page=100")]
+        return gh("api", "--paginate", f"repos/{self.repo}/tags?per_page=100", "--jq", ".[].name").split()
 
     def file(self, path, ref):
         return gh("api", f"repos/{self.repo}/contents/{path}?ref={ref}", "-H", "Accept: application/vnd.github.raw")
@@ -119,6 +120,11 @@ class Fixture:
 
     def head(self, branch):
         return api(f"repos/{self.repo}/branches/{branch}")["commit"]["sha"]
+
+    def commit_to_develop(self, path, message):
+        """Add a file on develop: unreleased work a hotfix must leave out."""
+        api(f"repos/{self.repo}/contents/{path}", "-X", "PUT", "-f", f"message={message}",
+            "-f", f"content={base64.b64encode(path.encode()).decode()}", "-f", "branch=develop")
 
     def merge_master_into_develop(self):
         # Stands in for the merge-back a cancelled release never reaches, so the next cycle's
@@ -187,6 +193,8 @@ def scenario_rc_cycle(fx):
     expect(fx.tag_sha(tag) == fx.head(branch), f"{tag}: on the release branch head")
     prs = json.loads(gh("pr", "list", "-R", fx.repo, "--head", branch, "--json", "number"))
     expect(prs == [], f"{branch}: no PR for an RC")
+    rc_commit = api(f"repos/{fx.repo}/commits/{branch}")
+    expect([f["filename"] for f in rc_commit["files"]] == ["package.json"], f"{branch}: the RC commit leaves CHANGELOG.md alone")
 
     release = fx.next_run("release.yml", tag, created_at(prep))
     fx.until_approval(release)
@@ -203,8 +211,12 @@ def scenario_hotfix_cycle(fx):
         (tuple(int(p) for p in t[1:].split(".")), t)
         for t in fx.tags()
         if t.startswith("v") and t[1:].replace(".", "").isdigit() and t.count(".") == 2
-    )[-1]
-    (major, minor, patch), base_tag = stable
+    )
+    if not stable:
+        raise Failed("the fixture has no stable tag to hotfix")
+    (major, minor, patch), base_tag = stable[-1]
+    marker = f"e2e/unreleased-{unique_minor()}.txt"
+    fx.commit_to_develop(marker, "feat: unreleased work on develop (e2e)")
     rc = f"{major}.{minor}.{patch + 1}-rc.{unique_minor()}"
     tag = f"v{rc}"
     prep = fx.finish(fx.dispatch("prepare-release.yml", "master", version=rc, base="hotfix", **{"dry-run": "false"}))
@@ -212,8 +224,8 @@ def scenario_hotfix_cycle(fx):
     branch = f"hotfix/{major}.{minor}.{patch + 1}"
     compare = api(f"repos/{fx.repo}/compare/{base_tag}...{branch}")
     expect(compare["behind_by"] == 0, f"{branch}: contains {base_tag}")
-    develop_only = api(f"repos/{fx.repo}/compare/{branch}...develop")["ahead_by"]
-    expect(develop_only > 0, f"{branch}: leaves out develop's {develop_only} unreleased commit(s)")
+    files = [f["filename"] for f in api(f"repos/{fx.repo}/compare/{base_tag}...{branch}")["files"]]
+    expect(marker not in files, f"{branch}: leaves out develop's unreleased {marker}")
 
     release = fx.next_run("release.yml", tag, created_at(prep))
     fx.until_approval(release)
@@ -245,8 +257,8 @@ def main():
         print(f"▶ {name}")
         try:
             SCENARIOS[name](fx)
-        except Failed as e:
-            print(f"  ✗ {e}")
+        except Exception as e:  # one broken scenario must not hide the others
+            print(f"  ✗ {type(e).__name__ if not isinstance(e, Failed) else 'failed'}: {e}")
             failed.append(name)
     print(f"\n{len(failed)} of {len(args.only or SCENARIOS)} scenarios failed" + (f": {', '.join(failed)}" if failed else ""))
     return 1 if failed else 0

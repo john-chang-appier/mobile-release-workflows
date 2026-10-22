@@ -44,6 +44,9 @@ Undo a deprecation with `npm deprecate @appier/react-native-sdk@2.4.0 ""`.
 
 ### GitHub Packages (`internal` channel)
 
+The package lives under the org that owns the SDK repo; check the name on the repo's **Packages**
+tab before running these.
+
 ```sh
 # Find the version id
 gh api /orgs/plaxieappier/packages/npm/react-native-sdk/versions --jq '.[] | "\(.id) \(.name)"'
@@ -53,15 +56,16 @@ gh api -X DELETE /orgs/plaxieappier/packages/npm/react-native-sdk/versions/<id>
 
 ### pub.dev (`appier_flutter`)
 
-Retract the version in the browser: pub.dev → `appier_flutter` → **Admin** → **Versions** →
-**Retract** next to the version. Retraction is possible within 7 days of publishing and can be
+There is no CLI for this; `dart pub` can't retract. Retract the version in the browser: pub.dev →
+`appier_flutter` → **Admin** → **Versions** → **Retract** next to the version. Retraction is possible within 7 days of publishing and can be
 undone in the same place. A retracted version stays downloadable for apps that already lock it,
 but new resolves skip it. After 7 days, only a new patch version helps.
 
 ### Maven Central (`appier-android`)
 
-Published components can't be removed or replaced. Publish the next patch through a hotfix and
-announce it. A deployment that has not been published yet can still be dropped in the Central
+Published components can't be removed or replaced, and there is no command that withdraws one.
+Publish the next patch through a hotfix (`prepare-release` with `base: hotfix` and `X.Y.Z+1-rc.1`)
+and announce it. A deployment that has not been published yet can still be dropped in the Central
 Portal under **Deployments** → **Drop**.
 
 ## After any of the above
