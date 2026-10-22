@@ -6,3 +6,6 @@ version:
     - {file: sdk/package.json, path: .version}
     - {file: sdk/android/build.gradle, regex: "ext\\.appier_sub_version = '([^']+)'"}
     - {file: sdk/ios/appier_flutter.podspec, regex: "s\\.version\\s*=\\s*'([^']+)'"}
+native-deps:
+  - {name: appier-android, repo: plaxieappier/appier-android, file: sdk/android/build.gradle, regex: "ext\\.appier_version = '([^']+)'"}
+  - {name: AppierFramework, repo: appier/appier-ios-framework, file: sdk/ios/appier_flutter.podspec, regex: "'AppierFramework', '([^']+)'"}

@@ -28,6 +28,12 @@ def _validate(data: dict) -> None:
         raise ConfigError(f"platform: unknown value {data['platform']!r}, expected one of {', '.join(PLATFORMS)}")
     for field, locator in locators(data):
         _validate_locator(field, locator)
+    for i, dep in enumerate(data.get("native-deps") or []):
+        field = f"native-deps[{i}]"
+        missing = [k for k in ("name", "repo") if not (isinstance(dep, dict) and dep.get(k))]
+        if missing:
+            raise ConfigError(f"{field}: requires {' and '.join(missing)}")
+        _validate_locator(field, dep)
 
 
 def locators(data: dict):

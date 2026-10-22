@@ -53,3 +53,13 @@ def test_get_returns_the_configured_value(repo, run):
 def test_get_channels_lists_the_allowed_channels_one_per_line(repo, run):
     assert run("config", "get", "channels", "--repo", repo("react-native"))[1] == "internal\npublic\n"
     assert run("config", "get", "channels", "--repo", repo("android"))[1] == "public\n"
+
+
+def test_native_dep_without_a_repo_is_rejected(repo, run):
+    r = repo("flutter")
+    edit_config(r, lambda c: c["native-deps"][1].pop("repo"))
+
+    code, _, err = run("config", "validate", "--repo", r)
+
+    assert code != 0
+    assert "native-deps[1]" in err and "repo" in err
