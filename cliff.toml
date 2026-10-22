@@ -2,7 +2,7 @@
 [changelog]
 header = ""
 body = """
-## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+## [{{ get_env(name="RELEASE_VERSION") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
 {% for group, commits in commits | group_by(attribute="group") %}
 ### {{ group | striptags | trim | upper_first }}
 {% for commit in commits %}
@@ -16,8 +16,9 @@ trim = true
 conventional_commits = true
 filter_unconventional = true
 commit_preprocessors = [
-  # "[MT-1234] feat: x" → "feat: x (MT-1234)", so the conventional-commit parser sees the type first.
-  { pattern = '^\[([A-Z][A-Z0-9]+-\d+)\]\s*(.*)$', replace = "${2} (${1})" },
+  # "[MT-1234] feat: x" → "feat: x (MT-1234)", so the conventional-commit parser sees the type
+  # first. Matches the subject line only, so commits with a body or trailers still parse.
+  { pattern = '^\[([A-Z][A-Z0-9]+-\d+)\]\s*([^\n]*)', replace = "${2} (${1})" },
   { pattern = '\b([A-Z][A-Z0-9]+-\d+)\b', replace = "[${1}](https://appier.atlassian.net/browse/${1})" },
 ]
 commit_parsers = [
@@ -28,5 +29,6 @@ commit_parsers = [
   { message = "^chore\\(release\\)", skip = true },
   { message = "^(chore|ci|build|docs|style|test)", skip = true },
 ]
+# Overridden by prepare-release with the repo's tag-prefix (GIT_CLIFF__GIT__TAG_PATTERN).
 tag_pattern = "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
 sort_commits = "oldest"

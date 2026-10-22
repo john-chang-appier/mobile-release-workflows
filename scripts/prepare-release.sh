@@ -11,14 +11,17 @@ set -euo pipefail
 DRY_RUN="${DRY_RUN:-true}"
 
 release-tool config validate
-case "$VERSION" in
-  *-*) echo "error: $VERSION is a prerelease; RC releases are not supported yet" >&2; exit 1 ;;
-esac
+if ! [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+  echo "error: '${VERSION}' is not a stable version (X.Y.Z); RC releases are not supported yet" >&2
+  exit 1
+fi
 
 prefix="$(release-tool config get tag-prefix)"
 workdir="$(release-tool config get working-directory)"
 tag="${prefix}${VERSION}"
 branch="release/${VERSION}"
+
+start_ref="$(git symbolic-ref --quiet --short HEAD || git rev-parse HEAD)"
 
 git fetch --quiet --tags origin
 if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
@@ -36,16 +39,19 @@ else
   git checkout --quiet -B "$branch" origin/develop
 fi
 
-release-tool version write "$VERSION"
+version_files=()
+while IFS= read -r f; do version_files+=("$f"); done < <(release-tool version write "$VERSION")
 
 changelog="${workdir}/CHANGELOG.md"
 config="cliff.toml"
 [ -f "$config" ] || config="${CLIFF_CONFIG:?CLIFF_CONFIG is required when the repo has no cliff.toml}"
-if [ -f "$changelog" ] && grep -q "^## \[${VERSION}\]" "$changelog"; then
+if [ -f "$changelog" ] && grep -qF "## [${VERSION}]" "$changelog"; then
   echo "${changelog} already has a ${VERSION} section; leaving it as is"
 else
   touch "$changelog"  # --prepend needs an existing file
-  git-cliff --config "$config" --unreleased --tag "$tag" --prepend "$changelog"
+  RELEASE_VERSION="$VERSION" \
+  GIT_CLIFF__GIT__TAG_PATTERN="^${prefix}[0-9]+\.[0-9]+\.[0-9]+$" \
+    git-cliff --config "$config" --unreleased --tag "$tag" --prepend "$changelog"
 fi
 
 if [ "$DRY_RUN" = "true" ]; then
@@ -53,10 +59,11 @@ if [ "$DRY_RUN" = "true" ]; then
   git add --intent-to-add -- "$changelog"  # include the new CHANGELOG in the diff
   git --no-pager diff
   git reset --quiet && git checkout --quiet -- . && git clean --quiet -fd -- "$changelog"
+  git checkout --quiet "$start_ref"
   exit 0
 fi
 
-git add -A
+git add -- "${version_files[@]}" "$changelog"
 if git diff --cached --quiet; then
   echo "${branch} already has ${VERSION} and its CHANGELOG section; nothing to commit"
 else
