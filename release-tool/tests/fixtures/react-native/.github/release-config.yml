@@ -1,0 +1,4 @@
+platform: react-native
+channels: [internal, public]
+version:
+  primary: {file: package.json, path: .version}

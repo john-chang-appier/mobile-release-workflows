@@ -1,0 +1,8 @@
+{
+  "name": "@appier/react-native-sdk",
+  "version": "2.3.1",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/plaxieappier/appier-react-native.git"
+  }
+}

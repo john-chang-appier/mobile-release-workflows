@@ -1,0 +1,8 @@
+group 'com.appier.appier_flutter'
+version '1.0-SNAPSHOT'
+
+buildscript {
+    ext.kotlin_version = '1.8.22'
+    ext.appier_version = '8.11.0'
+    ext.appier_sub_version = '3.7.0'
+}

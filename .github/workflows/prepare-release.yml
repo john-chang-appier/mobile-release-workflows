@@ -1,0 +1,68 @@
+name: prepare-release
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Stable version to prepare, X.Y.Z
+        type: string
+        required: true
+      dry-run:
+        description: Print the plan without pushing or opening a PR
+        type: boolean
+        default: true
+      central-ref:
+        description: Ref of mobile-release-workflows to load release-tool from; match the ref in `uses:`
+        type: string
+        default: v1
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/checkout@v4
+        with:
+          repository: plaxieappier/mobile-release-workflows
+          ref: ${{ inputs.central-ref }}
+          path: .release-workflows
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install release-tool and git-cliff
+        run: pip install ./.release-workflows/release-tool git-cliff==2.14.2
+
+      - name: Prepare release branch
+        env:
+          VERSION: ${{ inputs.version }}
+          DRY_RUN: ${{ inputs.dry-run }}
+          CLIFF_CONFIG: .release-workflows/cliff.toml
+        run: |
+          echo ".release-workflows/" >> .git/info/exclude
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          .release-workflows/scripts/prepare-release.sh
+
+      - name: Open release PR
+        if: ${{ !inputs.dry-run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          branch="release/${VERSION}"
+          if [ -n "$(gh pr list --head "$branch" --base master --state open --json number --jq '.[].number')" ]; then
+            echo "A release PR from ${branch} is already open"
+          else
+            gh pr create --base master --head "$branch" \
+              --title "Release ${VERSION}" \
+              --body "Prepared by prepare-release. Review the version files and the CHANGELOG section, then merge to start the release."
+          fi

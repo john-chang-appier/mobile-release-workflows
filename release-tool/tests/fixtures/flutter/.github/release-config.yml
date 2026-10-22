@@ -1,0 +1,8 @@
+platform: flutter
+working-directory: sdk
+version:
+  primary: {file: sdk/pubspec.yaml, path: .version}
+  sync:
+    - {file: sdk/package.json, path: .version}
+    - {file: sdk/android/build.gradle, regex: "ext\\.appier_sub_version = '([^']+)'"}
+    - {file: sdk/ios/appier_flutter.podspec, regex: "s\\.version\\s*=\\s*'([^']+)'"}
