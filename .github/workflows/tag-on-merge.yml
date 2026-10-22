@@ -72,7 +72,8 @@ jobs:
           fi
           tag="$(release-tool config get tag-prefix)${version}"
 
-          existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha 2>/dev/null || true)"
+          # gh prints the 404 body on stdout, so only trust the output when the call succeeded.
+          existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha 2>/dev/null)" || existing=""
           if [ -z "$existing" ]; then
             gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$SHA" > /dev/null
             echo "Tagged $SHA as $tag"
