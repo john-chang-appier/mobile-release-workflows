@@ -19,24 +19,45 @@ on:
         description: Ref of central-repo to load release-tool from; match the ref in `uses:`
         type: string
         default: v1
+    secrets:
+      RELEASE_APP_PRIVATE_KEY:
+        description: Private key of the release GitHub App; its App ID is the RELEASE_APP_ID variable
+        required: true
 
+# Everything that writes, or reads the private central repo, uses the release App's token:
+# GITHUB_TOKEN can't read another private repo, and its pushes and PRs start no workflows.
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   prepare:
     runs-on: ubuntu-latest
     steps:
+      - name: Scope the App token to this repo and the central repo
+        id: scope
+        env:
+          CENTRAL_REPO: ${{ inputs.central-repo }}
+        run: echo "repositories=${GITHUB_REPOSITORY#*/},${CENTRAL_REPO#*/}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.scope.outputs.repositories }}
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
 
       - uses: actions/checkout@v4
         with:
           repository: ${{ inputs.central-repo }}
           ref: ${{ inputs.central-ref }}
           path: .release-workflows
+          token: ${{ steps.app-token.outputs.token }}
 
       - uses: actions/setup-python@v5
         with:
@@ -50,16 +71,19 @@ jobs:
           VERSION: ${{ inputs.version }}
           DRY_RUN: ${{ inputs.dry-run }}
           CLIFF_CONFIG: .release-workflows/cliff.toml
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
         run: |
           echo ".release-workflows/" >> .git/info/exclude
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          bot_id="$(gh api "/users/${APP_SLUG}%5Bbot%5D" --jq .id)"
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${bot_id}+${APP_SLUG}[bot]@users.noreply.github.com"
           .release-workflows/scripts/prepare-release.sh
 
       - name: Open release PR
         if: ${{ !inputs.dry-run }}
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           VERSION: ${{ inputs.version }}
         run: |
           branch="release/${VERSION}"

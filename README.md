@@ -27,7 +27,12 @@ The shared release pipeline for Appier mobile SDKs. Design: MT-9607 proposal in
    A locator is `{file, path}` (yq-style path into YAML or JSON) or `{file, regex}` with exactly
    one capture group. `file` is relative to the repo root.
 
-2. Add a caller workflow that `uses: plaxieappier/mobile-release-workflows/.github/workflows/prepare-release.yml@v1`
+2. Give the repo the release GitHub App: install the App on the SDK repo and on this repo,
+   set the variable `RELEASE_APP_ID` and the secret `RELEASE_APP_PRIVATE_KEY` (org-level in
+   `plaxieappier`), and call the workflow with `secrets: inherit`. App permissions: Contents
+   read/write, Pull requests read/write, Actions read/write, Checks read, Commit statuses read.
+
+3. Add a caller workflow that `uses: plaxieappier/mobile-release-workflows/.github/workflows/prepare-release.yml@v1`
    with `version` and `dry-run` inputs (manual dispatches should default `dry-run` to `true`).
    When calling a fork or a branch, also pass `central-repo` and `central-ref` so release-tool
    loads from the same place as the workflow.
