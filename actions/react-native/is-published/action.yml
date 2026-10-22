@@ -1,0 +1,47 @@
+name: react-native / is-published
+description: Is this version already in the channel's registry? Exports RELEASE_PUBLISHED=true|false
+inputs:
+  working-directory:
+    description: Package root
+    default: "."
+  version:
+    description: Version being released
+    required: true
+  channel:
+    description: internal | public
+    default: public
+  dry-run:
+    description: "\"true\" to skip anything irreversible"
+    default: "true"
+outputs:
+  published:
+    description: "\"true\" when the registry already has the version"
+    value: ${{ steps.view.outputs.published }}
+runs:
+  using: composite
+  steps:
+    - id: view
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        CHANNEL: ${{ inputs.channel }}
+        VERSION: ${{ inputs.version }}
+        GH_PACKAGES_TOKEN: ${{ github.token }}
+      run: |
+        name="$(node -p 'require("./package.json").name')"
+        args=()
+        if [ "$CHANNEL" = internal ]; then
+          args=(--registry https://npm.pkg.github.com "--//npm.pkg.github.com/:_authToken=$GH_PACKAGES_TOKEN")
+        fi
+        # A missing package fails with E404; a missing version of an existing package prints nothing.
+        if out="$(npm view "$name@$VERSION" version "${args[@]}" 2>"$RUNNER_TEMP/npm-view.err")"; then
+          if [ -n "$out" ]; then published=true; else published=false; fi
+        elif grep -q "E404" "$RUNNER_TEMP/npm-view.err"; then
+          published=false
+        else
+          cat "$RUNNER_TEMP/npm-view.err" >&2
+          exit 1
+        fi
+        echo "$name@$VERSION published: $published"
+        echo "published=$published" >> "$GITHUB_OUTPUT"
+        echo "RELEASE_PUBLISHED=$published" >> "$GITHUB_ENV"

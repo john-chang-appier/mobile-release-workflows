@@ -1,0 +1,48 @@
+name: react-native / publish
+description: >-
+  Publish RELEASE_ARTIFACT_PATH under RELEASE_DIST_TAG. public goes to npmjs with OIDC trusted
+  publishing; internal goes to GitHub Packages with GITHUB_TOKEN. Exports RELEASE_ARTIFACT_URL.
+inputs:
+  working-directory:
+    description: Package root
+    default: "."
+  version:
+    description: Version being released
+    required: true
+  channel:
+    description: internal | public
+    default: public
+  dry-run:
+    description: "\"true\" to skip anything irreversible"
+    default: "true"
+outputs:
+  artifact-url:
+    description: Where the published version can be seen
+    value: ${{ steps.publish.outputs.artifact-url }}
+runs:
+  using: composite
+  steps:
+    - id: publish
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        CHANNEL: ${{ inputs.channel }}
+        VERSION: ${{ inputs.version }}
+        DRY_RUN: ${{ inputs.dry-run }}
+        GH_PACKAGES_TOKEN: ${{ github.token }}
+      run: |
+        : "${RELEASE_ARTIFACT_PATH:?the skeleton sets RELEASE_ARTIFACT_PATH}" "${RELEASE_DIST_TAG:?the skeleton sets RELEASE_DIST_TAG}"
+        name="$(node -p 'require("./package.json").name')"
+        args=(--tag "$RELEASE_DIST_TAG")
+        [ "$DRY_RUN" = true ] && args+=(--dry-run)
+        if [ "$CHANNEL" = internal ]; then
+          args+=(--registry https://npm.pkg.github.com "--//npm.pkg.github.com/:_authToken=$GH_PACKAGES_TOKEN")
+          url="https://github.com/$GITHUB_REPOSITORY/pkgs/npm/${name#*/}"
+        else
+          # No token: npm >= 11.5.1 exchanges the job's OIDC token with npmjs (trusted publishing).
+          args+=(--access public --provenance)
+          url="https://www.npmjs.com/package/$name/v/$VERSION"
+        fi
+        npm publish "$RELEASE_ARTIFACT_PATH" "${args[@]}"
+        echo "artifact-url=$url" >> "$GITHUB_OUTPUT"
+        echo "RELEASE_ARTIFACT_URL=$url" >> "$GITHUB_ENV"

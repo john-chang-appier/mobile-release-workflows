@@ -1,7 +1,18 @@
 name: release
 
-# Runs on a release tag ref, dispatched by tag-on-merge. Stage order: prepare → build, then
-# (later tickets) approval → publish → GitHub Release → merge-back → Slack.
+# Runs on a release tag ref, dispatched by tag-on-merge (stable) or prepare-release (RC).
+# prepare → build → production approval → publish → GitHub Release → merge-back → Slack.
+# A run that fails before its version is published withdraws the tag.
+#
+# Caller requirements: name the file release.yml (npm trusted publishing is bound to it), give
+# it a boolean `dry-run` input, grant the job `contents: read`, `id-token: write` and
+# `packages: write`, set `concurrency: {group: release-<repo>, cancel-in-progress: false}`, and
+# pass `secrets: inherit`.
+#
+# Adapter contract: every platform provides actions/<platform>/{setup,verify,test,build,
+# is-published,publish}. build exports RELEASE_ARTIFACT_PATH, is-published exports
+# RELEASE_PUBLISHED, publish exports RELEASE_ARTIFACT_URL and reads RELEASE_DIST_TAG.
+# Platforms are named only in the dispatch-table blocks below.
 
 on:
   workflow_call:
@@ -11,7 +22,7 @@ on:
         type: string
         default: public
       dry-run:
-        description: Skip anything irreversible
+        description: Skip anything irreversible (publish runs in dry-run mode, the GitHub Release is a draft)
         type: boolean
         default: true
       ci-timeout-minutes:
@@ -30,13 +41,22 @@ on:
       RELEASE_APP_PRIVATE_KEY:
         description: Private key of the release GitHub App; its App ID is the RELEASE_APP_ID variable
         required: true
+      SLACK_RELEASE_WEBHOOK:
+        description: Slack incoming webhook for release outcomes; when unset the message is only logged
+        required: false
     outputs:
       version:
         description: Version being released
         value: ${{ jobs.prepare.outputs.version }}
+      artifact-url:
+        description: Where the published version can be seen
+        value: ${{ jobs.publish.outputs.artifact-url }}
 
 permissions:
   contents: read
+
+env:
+  CENTRAL_REPO: ${{ inputs.central-repo }}
 
 jobs:
   prepare:
@@ -45,6 +65,10 @@ jobs:
       platform: ${{ steps.config.outputs.platform }}
       version: ${{ steps.config.outputs.version }}
       working-directory: ${{ steps.config.outputs.working-directory }}
+      prerelease: ${{ steps.config.outputs.prerelease }}
+      dist-tag: ${{ steps.config.outputs.dist-tag }}
+      plan: ${{ steps.plan.outputs.plan }}
+      drift: ${{ steps.drift.outputs.warnings }}
     steps:
       - name: Require a tag ref
         if: github.ref_type != 'tag'
@@ -52,10 +76,8 @@ jobs:
           echo "::error::release must run on a tag ref, not ${GITHUB_REF}"
           exit 1
 
-      - name: Scope the App token to this repo and the central repo
+      - name: Scope the App token
         id: scope
-        env:
-          CENTRAL_REPO: ${{ inputs.central-repo }}
         run: echo "repositories=${GITHUB_REPOSITORY#*/},${CENTRAL_REPO#*/}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/create-github-app-token@v2
@@ -93,10 +115,12 @@ jobs:
             exit 1
           fi
           prefix="$(release-tool config get tag-prefix)"
+          version="${GITHUB_REF_NAME#"$prefix"}"
           {
             echo "platform=$(release-tool config get platform)"
             echo "working-directory=$(release-tool config get working-directory)"
-            echo "version=${GITHUB_REF_NAME#"$prefix"}"
+            echo "version=$version"
+            release-tool classify "$version"
           } >> "$GITHUB_OUTPUT"
 
       - name: Version files match the tag
@@ -127,16 +151,73 @@ jobs:
             sleep 30
           done
 
+      # ── Dispatch table: is-published ──
+      - if: steps.config.outputs.platform == 'react-native'
+        uses: ./.release-workflows/actions/react-native/is-published
+        with: &prepare-stage
+          working-directory: ${{ steps.config.outputs.working-directory }}
+          version: ${{ steps.config.outputs.version }}
+          channel: ${{ inputs.channel }}
+          dry-run: ${{ inputs.dry-run }}
+      # ── End of dispatch table ──
+
+      - name: Resume plan
+        id: plan
+        run: |
+          plan="$(release-tool plan --tag-exists true --published "$RELEASE_PUBLISHED")"
+          echo "plan=$plan" >> "$GITHUB_OUTPUT"
+          echo "Resume plan: $plan"
+
+      - name: Native drift
+        id: drift
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          mkdir -p native-tags
+          for repo in $(release-tool native-drift --list-repos); do
+            gh api --paginate "repos/$repo/tags?per_page=100" --jq '.[].name' \
+              > "native-tags/${repo//\//__}.txt" 2>/dev/null || rm -f "native-tags/${repo//\//__}.txt"
+          done
+          release-tool native-drift --tags-dir native-tags > drift.txt
+          while read -r line; do echo "::warning::$line"; done < drift.txt
+          { echo "warnings<<DRIFT_EOF"; cat drift.txt; echo "DRIFT_EOF"; } >> "$GITHUB_OUTPUT"
+
+      - name: Summary for the approver
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          DRY_RUN: ${{ inputs.dry-run }}
+          VERSION: ${{ steps.config.outputs.version }}
+          PRERELEASE: ${{ steps.config.outputs.prerelease }}
+          DIST_TAG: ${{ steps.config.outputs.dist-tag }}
+          PLAN: ${{ steps.plan.outputs.plan }}
+        run: |
+          {
+            echo "## Release $VERSION"
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| Tag | \`$GITHUB_REF_NAME\` on \`${GITHUB_SHA:0:7}\` |"
+            echo "| Channel | $CHANNEL (npm dist-tag \`$DIST_TAG\`) |"
+            echo "| Prerelease | $PRERELEASE |"
+            echo "| CI on the tagged commit | passed |"
+            echo "| Resume plan | $PLAN |"
+            echo "| Dry run | $DRY_RUN |"
+            echo
+            if [ -s drift.txt ]; then
+              echo "### ⚠️ Native drift"
+              sed 's/^/- /' drift.txt
+            else
+              echo "No native drift."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
   build:
     needs: prepare
+    if: needs.prepare.outputs.plan == 'publish'
     runs-on: ubuntu-latest
-    outputs:
-      artifact-path: ${{ steps.artifact.outputs.path }}
     steps:
-      - name: Scope the App token to the central repo
+      - name: Scope the App token
         id: scope
-        env:
-          CENTRAL_REPO: ${{ inputs.central-repo }}
         run: echo "repositories=${CENTRAL_REPO#*/}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/create-github-app-token@v2
@@ -157,8 +238,7 @@ jobs:
           path: .release-workflows
           token: ${{ steps.app-token.outputs.token }}
 
-      # ── Dispatch table: the only place that names platforms. Add a platform's four stages here. ──
-
+      # ── Dispatch table: setup, verify, test, build ──
       - if: needs.prepare.outputs.platform == 'react-native'
         uses: ./.release-workflows/actions/react-native/setup
         with: &stage
@@ -175,29 +255,136 @@ jobs:
       - if: needs.prepare.outputs.platform == 'react-native'
         uses: ./.release-workflows/actions/react-native/build
         with: *stage
-
       # ── End of dispatch table ──
-
-      # Every adapter's build exports RELEASE_ARTIFACT_PATH, so nothing below names a platform.
-      - id: artifact
-        run: echo "path=$RELEASE_ARTIFACT_PATH" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@v4
         with:
           name: release-artifact
-          path: ${{ steps.artifact.outputs.path }}
+          path: ${{ env.RELEASE_ARTIFACT_PATH }}
           if-no-files-found: error
 
-  # A run that fails before its version is published withdraws the tag, as a rejection does, so
-  # the next release PR can tag the same version. To retry a transient failure, re-run the
-  # tag-on-merge run: it re-creates the tag and dispatches a fresh release.
-  # TODO(ticket 03): keep the tag once the registry has the version, so a re-run resumes instead.
-  withdraw-tag:
+  publish:
     needs: [prepare, build]
-    if: >-
-      always() && github.ref_type == 'tag' &&
-      (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
+    if: needs.prepare.outputs.plan == 'publish'
     runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    outputs:
+      artifact-url: ${{ steps.url.outputs.artifact-url }}
+    env:
+      RELEASE_DIST_TAG: ${{ needs.prepare.outputs.dist-tag }}
+    steps:
+      - name: Scope the App token
+        id: scope
+        run: echo "repositories=${CENTRAL_REPO#*/}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.scope.outputs.repositories }}
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.central-repo }}
+          ref: ${{ inputs.central-ref }}
+          path: .release-workflows
+          token: ${{ steps.app-token.outputs.token }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-artifact
+          path: ${{ runner.temp }}/release-artifact
+
+      - name: Locate the artifact
+        run: echo "RELEASE_ARTIFACT_PATH=$(find "$RUNNER_TEMP/release-artifact" -type f | head -n 1)" >> "$GITHUB_ENV"
+
+      # ── Dispatch table: setup, publish ──
+      - if: needs.prepare.outputs.platform == 'react-native'
+        uses: ./.release-workflows/actions/react-native/setup
+        with: &publish-stage
+          working-directory: ${{ needs.prepare.outputs.working-directory }}
+          version: ${{ needs.prepare.outputs.version }}
+          channel: ${{ inputs.channel }}
+          dry-run: ${{ inputs.dry-run }}
+      - if: needs.prepare.outputs.platform == 'react-native'
+        uses: ./.release-workflows/actions/react-native/publish
+        with: *publish-stage
+      # ── End of dispatch table ──
+
+      - id: url
+        run: echo "artifact-url=$RELEASE_ARTIFACT_URL" >> "$GITHUB_OUTPUT"
+
+  github-release:
+    needs: [prepare, publish]
+    if: >-
+      always() && needs.prepare.result == 'success' &&
+      (needs.publish.result == 'success' || needs.prepare.outputs.plan == 'skip-publish')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Scope the App token
+        id: scope
+        run: echo "repositories=${GITHUB_REPOSITORY#*/},${CENTRAL_REPO#*/}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.scope.outputs.repositories }}
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.central-repo }}
+          ref: ${{ inputs.central-ref }}
+          path: .release-workflows
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Install release-tool and git-cliff
+        run: pip install ./.release-workflows/release-tool git-cliff==2.14.2
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+          DRY_RUN: ${{ inputs.dry-run }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists"
+            exit 0
+          fi
+          prefix="$(release-tool config get tag-prefix)"
+          # Stable notes cover previous stable → this tag; RC notes cover previous tag of any kind.
+          pattern="^${prefix}[0-9]+\.[0-9]+\.[0-9]+$"
+          [ "$PRERELEASE" = true ] && pattern="^${prefix}[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$"
+          config=cliff.toml
+          [ -f "$config" ] || config=.release-workflows/cliff.toml
+          RELEASE_VERSION="$VERSION" GIT_CLIFF__GIT__TAG_PATTERN="$pattern" \
+            git-cliff --config "$config" --current --strip header > notes.md
+          args=(--title "$VERSION" --notes-file notes.md --verify-tag)
+          [ "$PRERELEASE" = true ] && args+=(--prerelease --latest=false)
+          [ "$DRY_RUN" = true ] && args+=(--draft --title "$VERSION (dry run)")
+          gh release create "$GITHUB_REF_NAME" "${args[@]}"
+
+  merge-back:
+    needs: [prepare, github-release]
+    if: always() && needs.github-release.result == 'success' && needs.prepare.outputs.prerelease == 'false'
+    runs-on: ubuntu-latest
+    outputs:
+      conflict-url: ${{ steps.develop.outputs.conflict-url }}
     steps:
       - uses: actions/create-github-app-token@v2
         id: app-token
@@ -207,9 +394,180 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
 
-      - name: Delete the tag
+      - name: Merge back into develop
+        id: develop
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          url="$(gh pr list -R "$GITHUB_REPOSITORY" --base develop --head master --state open --json url --jq '.[0].url')"
+          if [ -z "$url" ]; then
+            if ! url="$(gh pr create -R "$GITHUB_REPOSITORY" --base develop --head master \
+                  --title "Merge back $VERSION into develop" \
+                  --body "Opened by the release workflow after $GITHUB_REF_NAME." 2>pr.err)"; then
+              if grep -q "No commits between" pr.err; then echo "develop already has master"; exit 0; fi
+              cat pr.err >&2; exit 1
+            fi
+          fi
+          echo "Merge-back PR: $url"
+          for _ in 1 2 3 4 5 6; do
+            state="$(gh pr view "$url" --json mergeable --jq .mergeable)"
+            [ "$state" != UNKNOWN ] && break
+            sleep 5
+          done
+          if [ "$state" = CONFLICTING ]; then
+            echo "::warning::Merge-back has conflicts: $url"
+            echo "conflict-url=$url" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Auto-merge waits for required checks; with none configured GitHub refuses it, so merge now.
+          gh pr merge "$url" --auto --merge || gh pr merge "$url" --merge
+
+      - name: Open PRs into other open release branches
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          # A hotfix must also reach release branches cut before it; those PRs are merged by a person
+          # because the branch may have an RC under QA.
+          for branch in $(gh api --paginate "repos/$GITHUB_REPOSITORY/branches?per_page=100" --jq '.[].name' | grep '^release/' || true); do
+            [ "$branch" = "release/$VERSION" ] && continue
+            if [ -n "$(gh pr list -R "$GITHUB_REPOSITORY" --base "$branch" --head master --state open --json number --jq '.[].number')" ]; then
+              continue
+            fi
+            gh pr create -R "$GITHUB_REPOSITORY" --base "$branch" --head master \
+              --title "Merge $VERSION into $branch" \
+              --body "Opened by the release workflow after $GITHUB_REF_NAME. Merge by hand once QA on $branch allows it." \
+              || echo "::warning::Could not open a PR into $branch"
+          done
+
+  # Withdraw the tag when the run failed (or was rejected or cancelled) before the version reached
+  # the registry, so the next release PR can tag the same version. Once the registry has the version
+  # the tag stays, and a re-run resumes per the resume plan.
+  withdraw-tag:
+    needs: [prepare, build, publish]
+    if: >-
+      always() && github.ref_type == 'tag' &&
+      (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Scope the App token
+        id: scope
+        run: echo "repositories=${GITHUB_REPOSITORY#*/},${CENTRAL_REPO#*/}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.scope.outputs.repositories }}
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.central-repo }}
+          ref: ${{ inputs.central-ref }}
+          path: .release-workflows
+          token: ${{ steps.app-token.outputs.token }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Read config
+        id: config
+        run: |
+          pip install ./.release-workflows/release-tool
+          prefix="$(release-tool config get tag-prefix)"
+          {
+            echo "platform=$(release-tool config get platform)"
+            echo "working-directory=$(release-tool config get working-directory)"
+            echo "version=${GITHUB_REF_NAME#"$prefix"}"
+          } >> "$GITHUB_OUTPUT"
+
+      # ── Dispatch table: is-published ──
+      - if: steps.config.outputs.platform == 'react-native'
+        uses: ./.release-workflows/actions/react-native/is-published
+        with:
+          working-directory: ${{ steps.config.outputs.working-directory }}
+          version: ${{ steps.config.outputs.version }}
+          channel: ${{ inputs.channel }}
+          dry-run: ${{ inputs.dry-run }}
+      # ── End of dispatch table ──
+
+      - name: Delete the tag unless the version is published
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
+          if [ "$RELEASE_PUBLISHED" = true ]; then
+            echo "::warning::$GITHUB_REF_NAME is already published; keeping the tag. Re-run this run to finish the release."
+            exit 0
+          fi
           gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$GITHUB_REF_NAME"
           echo "::notice::Deleted tag $GITHUB_REF_NAME. Fix the cause and merge a new release PR, or re-run tag-on-merge to retry."
+
+  notify:
+    needs: [prepare, build, publish, github-release, merge-back, withdraw-tag]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Scope the App token
+        id: scope
+        run: echo "repositories=${GITHUB_REPOSITORY#*/},${CENTRAL_REPO#*/}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.scope.outputs.repositories }}
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.central-repo }}
+          ref: ${{ inputs.central-ref }}
+          path: .release-workflows
+          token: ${{ steps.app-token.outputs.token }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Post the outcome to Slack
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          WEBHOOK: ${{ secrets.SLACK_RELEASE_WEBHOOK }}
+          RESULTS: ${{ toJSON(needs.*.result) }}
+          VERSION: ${{ needs.prepare.outputs.version || github.ref_name }}
+          ARTIFACT_URL: ${{ needs.publish.outputs.artifact-url }}
+          DRIFT: ${{ needs.prepare.outputs.drift }}
+          CONFLICT_URL: ${{ needs.merge-back.outputs.conflict-url }}
+          DRY_RUN: ${{ inputs.dry-run }}
+        run: |
+          pip install --quiet ./.release-workflows/release-tool
+          rejected="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" \
+            --jq '[.[] | select(.state == "rejected")] | length')"
+          if [ "$rejected" -gt 0 ]; then
+            outcome=rejected
+          elif echo "$RESULTS" | jq -e 'any(. == "failure" or . == "cancelled")' > /dev/null; then
+            outcome=failure
+          else
+            outcome=success
+          fi
+          printf '%s\n' "$DRIFT" > drift.txt
+          args=(--outcome "$outcome" --repo-name "$GITHUB_REPOSITORY" --version "$VERSION"
+                --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+                --warnings drift.txt)
+          [ -n "$ARTIFACT_URL" ] && args+=(--artifact-url "$ARTIFACT_URL")
+          [ -n "$CONFLICT_URL" ] && args+=(--merge-back-conflict "$CONFLICT_URL")
+          [ "$DRY_RUN" = true ] && args+=(--dry-run)
+          release-tool slack-message "${args[@]}" > payload.json
+          echo "Slack payload:"; cat payload.json
+          if [ -z "$WEBHOOK" ]; then
+            echo "::notice::SLACK_RELEASE_WEBHOOK is not set; the message above was not posted"
+            exit 0
+          fi
+          curl --fail --silent --show-error -X POST -H 'Content-Type: application/json' --data @payload.json "$WEBHOOK"

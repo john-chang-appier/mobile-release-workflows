@@ -4,13 +4,21 @@ on:
   workflow_call:
     inputs:
       version:
-        description: Stable version to prepare, X.Y.Z
+        description: X.Y.Z (stable; opens the PR to master) or X.Y.Z-rc.N (RC; tags and dispatches release)
         type: string
         required: true
+      base:
+        description: develop, or hotfix to cut hotfix/X.Y.Z from the latest stable tag; ignored when the branch exists
+        type: string
+        default: develop
       dry-run:
-        description: Print the plan without pushing or opening a PR
+        description: Print the plan without pushing, tagging, or opening a PR
         type: boolean
         default: true
+      release-dry-run:
+        description: For an RC, dispatch release with dry-run (a fixture repo sets this; SDK repos leave it false)
+        type: boolean
+        default: false
       central-repo:
         description: Repository to load release-tool from; match the repository in `uses:`
         type: string
@@ -67,8 +75,10 @@ jobs:
         run: pip install ./.release-workflows/release-tool git-cliff==2.14.2
 
       - name: Prepare release branch
+        id: prepare
         env:
           VERSION: ${{ inputs.version }}
+          BASE: ${{ inputs.base }}
           DRY_RUN: ${{ inputs.dry-run }}
           CLIFF_CONFIG: .release-workflows/cliff.toml
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -80,17 +90,28 @@ jobs:
           git config user.email "${bot_id}+${APP_SLUG}[bot]@users.noreply.github.com"
           .release-workflows/scripts/prepare-release.sh
 
-      - name: Open release PR
-        if: ${{ !inputs.dry-run }}
+      - name: Open or update the release PR
+        if: ${{ !inputs.dry-run && steps.prepare.outputs.prerelease == 'false' }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           VERSION: ${{ inputs.version }}
+          BRANCH: ${{ steps.prepare.outputs.branch }}
         run: |
-          branch="release/${VERSION}"
-          if [ -n "$(gh pr list --head "$branch" --base master --state open --json number --jq '.[].number')" ]; then
-            echo "A release PR from ${branch} is already open"
+          # The push above already updated an open PR; only open one when there is none.
+          if [ -n "$(gh pr list --head "$BRANCH" --base master --state open --json number --jq '.[].number')" ]; then
+            echo "Updated the open release PR from ${BRANCH}"
           else
-            gh pr create --base master --head "$branch" \
+            gh pr create --base master --head "$BRANCH" \
               --title "Release ${VERSION}" \
-              --body "Prepared by prepare-release. Review the version files and the CHANGELOG section, then merge to start the release."
+              --body "Prepared by prepare-release. Merging is QA's sign-off: merge only after QA passed the latest RC. Review the version files and the CHANGELOG section."
           fi
+
+      - name: Dispatch the RC release
+        if: ${{ !inputs.dry-run && steps.prepare.outputs.prerelease == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TAG: ${{ steps.prepare.outputs.tag }}
+          RELEASE_DRY_RUN: ${{ inputs.release-dry-run }}
+        run: |
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG" -f dry-run="$RELEASE_DRY_RUN"
+          echo "Dispatched release.yml on $TAG"
