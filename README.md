@@ -29,6 +29,8 @@ The shared release pipeline for Appier mobile SDKs. Design: MT-9607 proposal in
 
 2. Add a caller workflow that `uses: plaxieappier/mobile-release-workflows/.github/workflows/prepare-release.yml@v1`
    with `version` and `dry-run` inputs (manual dispatches should default `dry-run` to `true`).
+   When calling a fork or a branch, also pass `central-repo` and `central-ref` so release-tool
+   loads from the same place as the workflow.
 
 ## release-tool
 

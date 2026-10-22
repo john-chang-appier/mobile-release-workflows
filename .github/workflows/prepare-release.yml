@@ -11,8 +11,12 @@ on:
         description: Print the plan without pushing or opening a PR
         type: boolean
         default: true
+      central-repo:
+        description: Repository to load release-tool from; match the repository in `uses:`
+        type: string
+        default: plaxieappier/mobile-release-workflows
       central-ref:
-        description: Ref of mobile-release-workflows to load release-tool from; match the ref in `uses:`
+        description: Ref of central-repo to load release-tool from; match the ref in `uses:`
         type: string
         default: v1
 
@@ -30,7 +34,7 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          repository: plaxieappier/mobile-release-workflows
+          repository: ${{ inputs.central-repo }}
           ref: ${{ inputs.central-ref }}
           path: .release-workflows
 
