@@ -187,3 +187,29 @@ jobs:
           name: release-artifact
           path: ${{ steps.artifact.outputs.path }}
           if-no-files-found: error
+
+  # A run that fails before its version is published withdraws the tag, as a rejection does, so
+  # the next release PR can tag the same version. To retry a transient failure, re-run the
+  # tag-on-merge run: it re-creates the tag and dispatches a fresh release.
+  # TODO(ticket 03): keep the tag once the registry has the version, so a re-run resumes instead.
+  withdraw-tag:
+    needs: [prepare, build]
+    if: >-
+      always() && github.ref_type == 'tag' &&
+      (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Delete the tag
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$GITHUB_REF_NAME"
+          echo "::notice::Deleted tag $GITHUB_REF_NAME. Fix the cause and merge a new release PR, or re-run tag-on-merge to retry."
