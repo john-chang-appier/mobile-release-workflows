@@ -120,8 +120,8 @@ jobs:
             echo "platform=$(release-tool config get platform)"
             echo "working-directory=$(release-tool config get working-directory)"
             echo "version=$version"
-            release-tool classify "$version"
           } >> "$GITHUB_OUTPUT"
+          release-tool classify "$version" | tee -a "$GITHUB_OUTPUT"
 
       - name: Version files match the tag
         run: release-tool version verify "$GITHUB_REF_NAME"
