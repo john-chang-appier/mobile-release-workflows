@@ -65,6 +65,9 @@ defaults:
 jobs:
   prepare:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk  # the SDK checkout; the central repo sits beside it, outside the package
     permissions:
       contents: read
       packages: read  # is-published reads GitHub Packages for the internal channel
@@ -79,12 +82,14 @@ jobs:
     steps:
       - name: Require a tag ref
         if: github.ref_type != 'tag'
+        working-directory: .
         run: |
           echo "::error::release must run on a tag ref, not ${GITHUB_REF}"
           exit 1
 
       - name: Scope the App token
         id: scope
+        working-directory: .
         run: echo "repositories=${GITHUB_REPOSITORY#*/},${CENTRAL_REPO#*/}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/create-github-app-token@v2
@@ -96,6 +101,8 @@ jobs:
           repositories: ${{ steps.scope.outputs.repositories }}
 
       - uses: actions/checkout@v4
+        with:
+          path: sdk
 
       - uses: actions/checkout@v4
         with:
@@ -109,7 +116,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install release-tool
-        run: pip install ./.release-workflows/release-tool
+        run: pip install ../.release-workflows/release-tool
 
       - name: Validate config
         id: config
@@ -125,7 +132,7 @@ jobs:
           version="${GITHUB_REF_NAME#"$prefix"}"
           {
             echo "platform=$(release-tool config get platform)"
-            echo "working-directory=$(release-tool config get working-directory)"
+            echo "working-directory=sdk/$(release-tool config get working-directory)"
             echo "version=$version"
           } >> "$GITHUB_OUTPUT"
           release-tool classify "$version" | tee -a "$GITHUB_OUTPUT"
@@ -222,9 +229,13 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.plan == 'publish'
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk  # the SDK checkout; the central repo sits beside it, outside the package
     steps:
       - name: Scope the App token
         id: scope
+        working-directory: .
         run: echo "repositories=${CENTRAL_REPO#*/}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/create-github-app-token@v2
@@ -236,6 +247,8 @@ jobs:
           repositories: ${{ steps.scope.outputs.repositories }}
 
       - uses: actions/checkout@v4
+        with:
+          path: sdk
 
       # Adapters are loaded from this checkout, so they always match central-ref.
       - uses: actions/checkout@v4
@@ -274,6 +287,9 @@ jobs:
     needs: [prepare, build]
     if: needs.prepare.outputs.plan == 'publish'
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk  # the SDK checkout; the central repo sits beside it, outside the package
     environment: production
     permissions:
       contents: read
@@ -286,6 +302,7 @@ jobs:
     steps:
       - name: Scope the App token
         id: scope
+        working-directory: .
         run: echo "repositories=${CENTRAL_REPO#*/}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/create-github-app-token@v2
@@ -297,6 +314,8 @@ jobs:
           repositories: ${{ steps.scope.outputs.repositories }}
 
       - uses: actions/checkout@v4
+        with:
+          path: sdk
 
       - uses: actions/checkout@v4
         with:
@@ -334,9 +353,13 @@ jobs:
       !cancelled() && needs.prepare.result == 'success' &&
       (needs.publish.result == 'success' || needs.prepare.outputs.plan == 'skip-publish')
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk  # the SDK checkout; the central repo sits beside it, outside the package
     steps:
       - name: Scope the App token
         id: scope
+        working-directory: .
         run: echo "repositories=${GITHUB_REPOSITORY#*/},${CENTRAL_REPO#*/}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/create-github-app-token@v2
@@ -349,6 +372,7 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
+          path: sdk
           fetch-depth: 0
 
       - uses: actions/checkout@v4
@@ -363,7 +387,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install release-tool and git-cliff
-        run: pip install ./.release-workflows/release-tool git-cliff==2.14.2
+        run: pip install ../.release-workflows/release-tool git-cliff==2.14.2
 
       - name: Create the GitHub Release
         env:
@@ -381,7 +405,7 @@ jobs:
           pattern="^${prefix}[0-9]+\.[0-9]+\.[0-9]+$"
           [ "$PRERELEASE" = true ] && pattern="^${prefix}[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$"
           config=cliff.toml
-          [ -f "$config" ] || config=.release-workflows/cliff.toml
+          [ -f "$config" ] || config=../.release-workflows/cliff.toml
           RELEASE_VERSION="$VERSION" GIT_CLIFF__GIT__TAG_PATTERN="$pattern" \
             git-cliff --config "$config" --current --strip header > notes.md
           title="$VERSION"
@@ -478,12 +502,16 @@ jobs:
       always() && github.ref_type == 'tag' &&
       (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk  # the SDK checkout; the central repo sits beside it, outside the package
     permissions:
       contents: read
       packages: read
     steps:
       - name: Scope the App token
         id: scope
+        working-directory: .
         run: echo "repositories=${GITHUB_REPOSITORY#*/},${CENTRAL_REPO#*/}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/create-github-app-token@v2
@@ -495,6 +523,8 @@ jobs:
           repositories: ${{ steps.scope.outputs.repositories }}
 
       - uses: actions/checkout@v4
+        with:
+          path: sdk
 
       - uses: actions/checkout@v4
         with:
@@ -510,11 +540,11 @@ jobs:
       - name: Read config
         id: config
         run: |
-          pip install ./.release-workflows/release-tool
+          pip install ../.release-workflows/release-tool
           prefix="$(release-tool config get tag-prefix)"
           {
             echo "platform=$(release-tool config get platform)"
-            echo "working-directory=$(release-tool config get working-directory)"
+            echo "working-directory=sdk/$(release-tool config get working-directory)"
             echo "version=${GITHUB_REF_NAME#"$prefix"}"
           } >> "$GITHUB_OUTPUT"
 

@@ -9,6 +9,9 @@ body = """
 - {% if commit.scope %}**{{ commit.scope }}:** {% endif %}{{ commit.message | upper_first }}\
 {% endfor %}
 {% endfor %}
+{% if commits | length == 0 %}
+No user-facing changes.
+{% endif %}
 """
 trim = true
 
