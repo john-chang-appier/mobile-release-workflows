@@ -103,7 +103,20 @@ class Fixture:
         return self.finish(run_id)
 
     def log(self, run_id):
+        """The run's log; GitHub serves it only once the run has completed."""
         return gh("run", "view", str(run_id), "-R", self.repo, "--log", check=False)
+
+    def approval_then_cancel(self, run_id):
+        """Wait for the approval request, then cancel the run; return its jobs.
+
+        Cancels on any failure too, so a broken scenario never leaves a run holding the
+        fixture's release concurrency group."""
+        try:
+            self.until_approval(run_id)
+            return self.jobs(run_id)
+        finally:
+            if self.run(run_id)["status"] != "completed":
+                self.cancel(run_id)
 
     def tag_sha(self, tag):
         ref = api(f"repos/{self.repo}/git/ref/tags/{tag}", check=False)
@@ -171,11 +184,9 @@ def scenario_stable_cycle(fx):
     expect(fx.tag_sha(tag) == fx.head("master"), f"{tag}: on the merge commit")
 
     release = fx.next_run("release.yml", tag, since)
-    fx.until_approval(release)
-    jobs = fx.jobs(release)
+    jobs = fx.approval_then_cancel(release)
     expect(jobs["prepare"]["conclusion"] == "success" and jobs["build"]["conclusion"] == "success",
            f"{tag}: prepare and build pass before approval")
-    fx.cancel(release)
     wait(f"{tag} withdrawn", lambda: fx.tag_sha(tag) is None, timeout=300)
     expect(True, f"{tag}: cancelling withdraws the tag")
     fx.merge_master_into_develop()
@@ -197,10 +208,9 @@ def scenario_rc_cycle(fx):
     expect([f["filename"] for f in rc_commit["files"]] == ["package.json"], f"{branch}: the RC commit leaves CHANGELOG.md alone")
 
     release = fx.next_run("release.yml", tag, created_at(prep))
-    fx.until_approval(release)
+    fx.approval_then_cancel(release)
     log = fx.log(release)
     expect("prerelease=true" in log and "dist-tag=rc" in log, f"{tag}: classified as a prerelease under rc")
-    fx.cancel(release)
     wait(f"{tag} withdrawn", lambda: fx.tag_sha(tag) is None, timeout=300)
     expect(True, f"{tag}: cancelling withdraws the tag")
 
@@ -228,8 +238,7 @@ def scenario_hotfix_cycle(fx):
     expect(marker not in files, f"{branch}: leaves out develop's unreleased {marker}")
 
     release = fx.next_run("release.yml", tag, created_at(prep))
-    fx.until_approval(release)
-    fx.cancel(release)
+    fx.approval_then_cancel(release)
     wait(f"{tag} withdrawn", lambda: fx.tag_sha(tag) is None, timeout=300)
     expect(True, f"{tag}: cancelling withdraws the tag")
 

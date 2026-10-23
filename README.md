@@ -53,8 +53,8 @@ When something goes wrong, see [RUNBOOK.md](RUNBOOK.md).
 
 2. Give the repo the release GitHub App: install the App on the SDK repo and on this repo,
    set the variable `RELEASE_APP_ID` and the secret `RELEASE_APP_PRIVATE_KEY` (org-level in
-   `plaxieappier`). App permissions: Contents read/write, Pull requests read/write, Actions
-   read/write, Checks read, Commit statuses read. Optionally set `SLACK_RELEASE_WEBHOOK`.
+   `plaxieappier`). App permissions: Contents read/write, Workflows read/write, Pull requests
+   read/write, Actions read/write, Checks read, Commit statuses read. Optionally set `SLACK_RELEASE_WEBHOOK`.
 
 3. Create the `production` environment: required reviewers `sdk-release-approvers`, prevent
    self-review, deployment tags `v*`. Protect `release/*` and `hotfix/*` from deletion, and allow
