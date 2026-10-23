@@ -56,11 +56,14 @@ When something goes wrong, see [RUNBOOK.md](RUNBOOK.md).
    `plaxieappier`). App permissions: Contents read/write, Workflows read/write, Pull requests
    read/write, Actions read/write, Checks read, Commit statuses read. Optionally set `SLACK_RELEASE_WEBHOOK`.
 
-3. Create the `production` environment: required reviewers `sdk-release-approvers`, prevent
+3. Run CI on pushes to `release/**` and `hotfix/**`: `prepare` waits for CI on the tagged
+   commit, and a branch without CI times out.
+
+4. Create the `production` environment: required reviewers `sdk-release-approvers`, prevent
    self-review, deployment tags `v*`. Protect `release/*` and `hotfix/*` from deletion, and allow
    auto-merge.
 
-4. Add three caller workflows, each `uses: plaxieappier/mobile-release-workflows/.github/workflows/<name>@v1`
+5. Add three caller workflows, each `uses: plaxieappier/mobile-release-workflows/.github/workflows/<name>@v1`
    with `secrets: inherit`:
 
    | Caller | Trigger | Requirements |

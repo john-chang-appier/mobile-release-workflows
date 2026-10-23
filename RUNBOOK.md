@@ -11,6 +11,7 @@ manual.
 | `prepare` waits for CI and times out | Withdrew the tag | Get CI green on the merge commit, then re-run the tag-on-merge run |
 | Failed after publish (GitHub Release, merge-back, Slack) | Kept the tag, because the registry has the version | **Re-run failed jobs** on the release run. The resume plan is `skip-publish`, so nothing is published twice |
 | Waiting for approval, but it shouldn't ship | — | **Reject** the deployment. The tag is withdrawn and Slack says `release rejected` |
+| A hotfix release fails at startup ("workflow file issue") | — | The hotfix branch is cut from the last stable tag, so its tag runs the caller workflows as they were at that release. If the callers changed since (for example new job permissions), cherry-pick the caller change onto `hotfix/X.Y.Z` by PR and prepare the next RC |
 | Merge-back PR has conflicts | Opened the PR; Slack links it | Resolve the conflicts on the PR and merge it the same day |
 | A version was published by hand, outside the pipeline | — | A release run on its tag sees the version in the registry and skips publish, so the pipeline never checks that artifact. Compare the registry artifact with the tag before letting the run finish, or reject it and ship the next patch |
 
